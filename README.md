@@ -1504,7 +1504,8 @@ package main
 import (
    "fmt"
    "log"
-   "github.com/ethereum/go-ethereum/common"   "github.com/ethereum/go-ethereum/ethclient"
+   "github.com/ethereum/go-ethereum/common"   
+   "github.com/ethereum/go-ethereum/ethclient"
    store "github.com/crazygit/ethereum-development-with-go-book-code/contracts"
 )
 
