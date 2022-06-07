@@ -104,11 +104,9 @@ func DecodeTransactionLogs(receipt *types.Receipt, contractABI *abi.ABI) {
 		if len(vLog.Data) > 0 {
 			fmt.Printf("Log Data in Hex: %s\n", hex.EncodeToString(vLog.Data))
 			outputDataMap := make(map[string]interface{})
-			if len(vLog.Data) != 0 {
-				err = contractABI.UnpackIntoMap(outputDataMap, event.Name, vLog.Data)
-				if err != nil {
-					log.Fatal(err)
-				}
+			err = contractABI.UnpackIntoMap(outputDataMap, event.Name, vLog.Data)
+			if err != nil {
+				log.Fatal(err)
 			}
 			fmt.Printf("Event outputs: %v\n", outputDataMap)
 		}

@@ -8,6 +8,7 @@
 
 在学习过程中,根据书籍的目录结构, 重写了书中的示例，并加上了自己的一些理解，方便后期参考。
 
+
 # 项目初始化
 ```shell
 $ mkdir -p go-ethereum
@@ -274,7 +275,8 @@ func main() {
 ```solidity
 function balanceOf(address _owner) constant returns (uint balance);
 ```
-在知道Token合约ABI的情况下，可以加载合约的ABI然后直接调用`balanceOf`方法。
+在知道Token合约ABI的情况下，可以加载合约的ABI然后直接调用`balanceOf`方法, 实现参考[[#查询ERC20合约]].
+
 另一个做法就是通过网关接口直接查询
 ```go
 package main
@@ -835,11 +837,9 @@ func DecodeTransactionLogs(receipt *types.Receipt, contractABI *abi.ABI) {
       if len(vLog.Data) > 0 {
          fmt.Printf("Log Data in Hex: %s\n", hex.EncodeToString(vLog.Data))
          outputDataMap := make(map[string]interface{})
-         if len(vLog.Data) != 0 {
-            err = contractABI.UnpackIntoMap(outputDataMap, event.Name, vLog.Data)
-            if err != nil {
-               log.Fatal(err)
-            }
+         err = contractABI.UnpackIntoMap(outputDataMap, event.Name, vLog.Data)
+         if err != nil {
+             log.Fatal(err)
          }
          fmt.Printf("Event outputs: %v\n", outputDataMap)
       }
@@ -1125,5 +1125,1032 @@ func main() {
    fmt.Printf("tx sent: %s\n", signedTx.Hash().Hex())
    // 转账成功的示例交易可以查看
    // https://ropsten.etherscan.io/tx/0x53b76c8b0ee2fd373b327d4224c1507d7c88e0ac3b9d016660774380cdc5aa17
+}
+```
+
+### 订阅新区块的信息
+需要使用`websocket`形式的provider url,然后通过`client.SubscribeNewHead()`方法订阅新区块的信息
+
+```go
+package main
+
+import (
+   "context"
+   "fmt"
+   "log"
+   "github.com/ethereum/go-ethereum/core/types"
+   "github.com/ethereum/go-ethereum/ethclient"
+)
+
+
+func main() {
+   client, err := ethclient.Dial("wss://mainnet.infura.io/ws/v3/28d5693e8bee4b58a61f0c627d62331e")
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   headers := make(chan *types.Header)
+   sub, err := client.SubscribeNewHead(context.Background(), headers)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   for {
+      select {
+      case err := <-sub.Err():
+         log.Fatal(err)
+      case header := <-headers:
+         fmt.Printf("Header Hash: %s\n", header.Hash().Hex())
+
+         block, err := client.BlockByHash(context.Background(), header.Hash())
+         if err != nil {
+            log.Fatal(err)
+         }
+
+         fmt.Printf("Block Hash: %s\n", block.Hash().Hex())
+         fmt.Printf("Block Number: %d\n", block.Number().Uint64())
+         fmt.Printf("Block Time: %d\n", block.Time())
+         fmt.Printf("Block None:%d\n", block.Nonce())
+         fmt.Printf("TTransactions Numbers: %d", len(block.Transactions()))
+      }
+   }
+}
+```
+
+
+### 创建原始交易的字符串
+与发送交易的流程一样的，加载私钥，设置交易信息，签名。只是最后一步不是发送交易，而是把交易转换成了十六进制的字符串。
+
+```go
+package main
+
+import (
+   "bytes"
+   "context"
+   "crypto/ecdsa"
+   "encoding/hex"
+   "fmt"
+   "log"
+   "math/big"
+   "os"
+   "github.com/ethereum/go-ethereum/common"
+   "github.com/ethereum/go-ethereum/core/types"
+   "github.com/ethereum/go-ethereum/crypto"
+   "github.com/ethereum/go-ethereum/ethclient"
+)
+
+func main() {
+   client, err := ethclient.Dial("https://ropsten.infura.io/v3/28d5693e8bee4b58a61f0c627d62331e")
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   privateKey, err := crypto.HexToECDSA(os.Getenv("PRIVATE_KEY"))
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   publicKey := privateKey.Public()
+   publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+   if !ok {
+      log.Fatal("cannot assert type: publicKey is not of type *ecdsa.PublicKey")
+   }
+
+   fromAddress := crypto.PubkeyToAddress(*publicKeyECDSA)
+   nonce, err := client.PendingNonceAt(context.Background(), fromAddress)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   value := big.NewInt(1000000000000000000) // in wei (1 eth)
+   gasLimit := uint64(21000)                // in units
+   gasPrice, err := client.SuggestGasPrice(context.Background())
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   toAddress := common.HexToAddress("0x4592d8f8d7b001e72cb26a73e4fa1806a51ac79d")
+   var data []byte
+   tx := types.NewTx(&types.LegacyTx{
+      Nonce:    nonce,
+      To:       &toAddress,
+      Value:    value,
+      Gas:      gasLimit,
+      GasPrice: gasPrice,
+      Data:     data,
+   })
+
+   chainID, err := client.NetworkID(context.Background())
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainID), privateKey)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   ts := types.Transactions{signedTx}
+   b := new(bytes.Buffer)
+   ts.EncodeIndex(0, b)
+   rawTxBytes := b.Bytes()
+   rawTxHex := hex.EncodeToString(rawTxBytes)
+
+   fmt.Printf(rawTxHex) // f86...772
+}
+```
+
+### 发送原始交易的字符串
+
+上面发送的交易字符串，可以直接发送，不再需要私钥信息了，使用方式上来讲，也算是对私钥的一种保护吧。
+
+```go
+package main
+
+import (
+   "context"
+   "encoding/hex"
+   "fmt"
+   "github.com/ethereum/go-ethereum/core/types"
+   "github.com/ethereum/go-ethereum/ethclient"
+   "github.com/ethereum/go-ethereum/rlp"
+   "log"
+)
+
+func main() {
+   client, err := ethclient.Dial("https://ropsten.infura.io/v3/28d5693e8bee4b58a61f0c627d62331e")
+   if err != nil {
+      log.Fatal(err)
+   }
+   // 这里是前面createRawTransaction脚本生成的原始交易字符串
+   // 可以看到，发送原始交易信息时，不再需要加载私钥和签名了，原始交易字符串里已经包含这些信息了
+   rawTx := "f86d8207548455d4a809825208944592d8f8d7b001e72cb26a73e4fa1806a51ac79d880de0b6b3a7640000802aa067b8d876ae5f053fb33beaefec3451dd30086cb8a2f545ae624617ff18aed542a06e0f076b9cbe148bb2c6cbcd052ffd8e94b0da9748bc81ed244adf8509447682"
+   rawTxBytes, err := hex.DecodeString(rawTx)
+
+   tx := new(types.Transaction)
+   err = rlp.DecodeBytes(rawTxBytes, &tx)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   err = client.SendTransaction(context.Background(), tx)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   fmt.Printf("tx sent: %s", tx.Hash().Hex())
+
+}
+```
+
+## 智能合约
+
+### 编写合约和生成ABI文件
+
+#### 安装solidity编译器
+
+```shell
+brew update
+brew tap ethereum/ethereum
+brew install solidity
+```
+
+为了调用合约，需要安装`abigen`工具，将合约的ABI信息转换为可以在go语言里使用的格式。
+
+
+#### 安装abigen
+
+
+##### 直接安装geth
+一般情况下，如果只是使用命令行工具，可以直接通过
+
+```shell
+$ brew tap ethereum/ethereum
+$ brew install ethereum
+```
+安装即可，安装好之后。在`/usr/local/bin/`目录下，便有了
+* `abigen`
+* `bootnode`
+* `checkpoint-admin`
+* `clef`
+* `devp2p`
+* `ethkey`
+* `evm`
+* `faucet`
+* `geth`
+* `p2psim`
+* `puppeth`
+* `rlpdump`
+* `wnode`
+
+命令可用。每个命令的作用可以参考[这里](https://github.com/ethereum/go-ethereum#executab
+
+##### 从源码安装
+
+开发时，为了使用`go-ethereum`中的代码，我们需要从源码安装
+
+```bash
+$ go get -d github.com/ethereum/go-ethereum
+```
+
+上面的命令只会将`go-ethereum`的代码安装到本地，并不会自动安装`github.com/ethereum/go-ethereum/cmd`目录下的各种命令行工具。
+
+可以使用下面的命令单独安装一个命令行工具`geth`
+
+```bash
+$ go install github.com/ethereum/go-ethereum/cmd/geth
+```
+
+也可先进入到`$GOPATH`的工作空间`$HOME/go/pkg/mod/github.com/ethereum/go-ethereum@v1.10.18`目录下，然后执行如下命令安装所有`github.com/ethereum/go-ethereum/cmd`目录下命令工具。
+
+```bash
+# 这里 ./... 表示安装当前目录ethereum/go-ethereum以及当前目录ethereum/go-ethereum下的所有目录的工具
+$ go install ./...
+```
+
+#### 创建合约
+
+```shell
+$ mkdir contracts
+$ cd contracts
+```
+
+变现一个测试合约`Store.sol`
+
+```solidity
+// SPDX-License-Identifier: GPL-3.0
+pragma solidity >=0.4.16 <0.9.0;
+
+contract Store {
+    event ItemSet(bytes32 key, bytes32 value);
+
+    string public version;
+    mapping (bytes32 => bytes32) public items;
+
+    constructor(string memory _version) {
+        version = _version;
+    }
+
+    function setItem(bytes32 key, bytes32 value) external {
+        items[key] = value;
+        emit ItemSet(key, value);
+    }
+}
+```
+
+在`build`目录下生成`Store.abi`文件和十六进制格式的二进制文件`Store.bin`
+
+```shell
+$ solc --abi --bin Store.sol -o build
+$ cd build
+$ ls
+Store.abi  Store.bin
+```
+使用`abigen`生成可以在go程序里直接使用的`Store.go`文件
+
+```shell
+$ abigen --bin=./build/Store.bin --abi=./build/Store.abi --pkg=store --out=Store.go
+```
+
+生成的`Store.go`文件里包含了`abi`信息和合约的二进制信息。
+
+### 部署合约
+部署合约的流程如下:
+1. 加载私钥
+2. 使用`bind.NewKeyedTransactorWithChainID`生成交易选项然后
+3. 直接使用前面通过`abigen`生成的`Store.go`文件里的`DeployStore()`方法即可部署合约。
+
+>[!info]
+> 1. 通过abigen生成部署合约的方法都是以`Deploy` + `合约名`的形式
+> 2. 合约地址在没有部署成功的时候就已经生成了，并不是部署完才有合约地址
+
+```go
+package main
+
+import (
+   "context"
+   "crypto/ecdsa"
+   "fmt"
+   "log"
+   "math/big"
+   "os"
+   "github.com/ethereum/go-ethereum/accounts/abi/bind"
+   "github.com/ethereum/go-ethereum/crypto"
+   "github.com/ethereum/go-ethereum/ethclient"
+   store "github.com/crazygit/ethereum-development-with-go-book-code/contracts"
+)
+
+func main() {
+   client, err := ethclient.Dial("https://ropsten.infura.io/v3/28d5693e8bee4b58a61f0c627d62331e")
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   privateKey, err := crypto.HexToECDSA(os.Getenv("PRIVATE_KEY"))
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   publicKey := privateKey.Public()
+   publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+   if !ok {
+      log.Fatal("cannot assert type: publicKey is not of type *ecdsa.PublicKey")
+   }
+
+   fromAddress := crypto.PubkeyToAddress(*publicKeyECDSA)
+   nonce, err := client.PendingNonceAt(context.Background(), fromAddress)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   gasPrice, err := client.SuggestGasPrice(context.Background())
+   if err != nil {
+      log.Fatal(err)
+   }
+   chainID, err := client.ChainID(context.Background())
+   if err != nil {
+      log.Fatal(err)
+   }
+   auth, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
+   if err != nil {
+      log.Fatal(err)
+   }
+   auth.Nonce = big.NewInt(int64(nonce))
+   auth.Value = big.NewInt(0)      // in wei
+   auth.GasLimit = uint64(1000000) // in units
+   auth.GasPrice = gasPrice
+
+   input := "1.0"
+   // 部署合约的方法名称始终以单词Deploy开头，后跟合约名称，在本例中为Store
+   address, tx, instance, err := store.DeployStore(auth, client, input)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   fmt.Printf("Contract Address: %s\n", address.Hex())
+   fmt.Printf("Transaction Hash: %s\n", tx.Hash().Hex())
+
+   _ = instance
+}
+```
+
+### 加载合约
+
+在拥有合约的`abi`文件和合约地址的情况下，可以直接使用`New<ContractName>`加载合约
+
+```go
+package main
+
+import (
+   "fmt"
+   "log"
+   "github.com/ethereum/go-ethereum/common"   "github.com/ethereum/go-ethereum/ethclient"
+   store "github.com/crazygit/ethereum-development-with-go-book-code/contracts"
+)
+
+func main() {
+   client, err := ethclient.Dial("https://ropsten.infura.io/v3/28d5693e8bee4b58a61f0c627d62331e")
+   if err != nil {
+      log.Fatal(err)
+   }
+   // 部署的合约地址
+   address := common.HexToAddress("0xDe348Ff064D244e6b983B9198E0bFbb9D4C5CD69")
+   instance, err := store.NewStore(address, client)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   fmt.Println("contract is loaded")
+   _ = instance
+}
+```
+
+### 查询合约
+合约加载之后，就可以调用`abi`里的相关方法来查询合约信息了。比如查询合约里之前设置的`version`变量和`items`信息
+
+```go
+package main
+
+import (
+   "fmt"
+   "log"
+   "github.com/ethereum/go-ethereum/common"
+   "github.com/ethereum/go-ethereum/ethclient"
+   store "github.com/crazygit/ethereum-development-with-go-book-code/contracts"
+)
+
+func main() {
+   client, err := ethclient.Dial("https://ropsten.infura.io/v3/28d5693e8bee4b58a61f0c627d62331e")
+   if err != nil {
+      log.Fatal(err)
+   }
+   // 部署的合约地址
+   address := common.HexToAddress("0xDe348Ff064D244e6b983B9198E0bFbb9D4C5CD69")
+   instance, err := store.NewStore(address, client)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   // 查询在合约中设置的Version变量
+   version, err := instance.Version(nil)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   fmt.Printf("Version: %s\n", version)
+
+   key := [32]byte{}
+   copy(key[:], "foo")
+   result, err := instance.Items(nil, key)
+   if err != nil {
+      log.Fatal(err)
+   }
+   fmt.Printf("%s => %s\n", string(key[:]), string(result[:]))
+}
+```
+
+### 写入智能合约
+
+跟部署合约类似，先记载私钥，然后使用`bind.NewKeyedTransactorWithChainID()`方法完成发起交易的相关信息，最后调用abi文件`Store.go`里的`SetItem()`方法来修改合约的`items`变量。
+
+```go
+package main
+
+import (
+   "context"
+   "crypto/ecdsa"
+   "fmt"
+   "github.com/ethereum/go-ethereum/crypto"
+   "log"
+   "math/big"
+   "os"
+   "github.com/ethereum/go-ethereum/accounts/abi/bind"
+   "github.com/ethereum/go-ethereum/common"
+   "github.com/ethereum/go-ethereum/ethclient"
+   store "github.com/crazygit/ethereum-development-with-go-book-code/contracts"
+)
+
+func main() {
+   client, err := ethclient.Dial("https://ropsten.infura.io/v3/28d5693e8bee4b58a61f0c627d62331e")
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   privateKey, err := crypto.HexToECDSA(os.Getenv("PRIVATE_KEY"))
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   publicKey := privateKey.Public()
+   publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+   if !ok {
+      log.Fatal("cannot assert type: publicKey is not of type *ecdsa.PublicKey")
+   }
+
+   fromAddress := crypto.PubkeyToAddress(*publicKeyECDSA)
+   nonce, err := client.PendingNonceAt(context.Background(), fromAddress)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   gasPrice, err := client.SuggestGasPrice(context.Background())
+   if err != nil {
+      log.Fatal(err)
+   }
+   chainID, err := client.ChainID(context.Background())
+   if err != nil {
+      log.Fatal(err)
+   }
+   auth, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
+   auth.Nonce = big.NewInt(int64(nonce))
+   auth.Value = big.NewInt(0)      // in wei
+   auth.GasLimit = uint64(1000000) // in units
+   auth.GasPrice = gasPrice
+   address := common.HexToAddress("0xDe348Ff064D244e6b983B9198E0bFbb9D4C5CD69")  // 部署的合约地址
+   instance, err := store.NewStore(address, client)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   key := [32]byte{}
+   value := [32]byte{}
+   copy(key[:], "foo")
+   copy(value[:], "bar")
+
+   tx, err := instance.SetItem(auth, key, value)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   fmt.Printf("tx sent: %s\n", tx.Hash().Hex())
+
+   result, err := instance.Items(nil, key)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   fmt.Println(string(result[:])) // "bar"
+}
+```
+
+### 读取合约的字节码信息
+
+使用`client.CodeAt()`方法,可以直接读取合约的字节码信息
+
+```go
+package main
+
+import (
+   "context"
+   "encoding/hex"
+   "fmt"
+   "log"
+   "github.com/ethereum/go-ethereum/common"
+   "github.com/ethereum/go-ethereum/ethclient"
+)
+
+func main() {
+   client, err := ethclient.Dial("https://ropsten.infura.io/v3/28d5693e8bee4b58a61f0c627d62331e")
+   if err != nil {
+      log.Fatal(err)
+   }
+   // 部署的合约地址
+   contractAddress := common.HexToAddress("0xDe348Ff064D244e6b983B9198E0bFbb9D4C5CD69")
+   bytecode, err := client.CodeAt(context.Background(), contractAddress, nil) // nil is latest block
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   fmt.Println(hex.EncodeToString(bytecode))
+}
+```
+
+### 查询ERC20合约
+
+所有的ERC20合约都实现了同样的一些方法，因此为了查询ERC20合约，我们只需要定义一个ERC20接口，生成ABI文件就可以使用了.
+```shell
+$ mkdir contracts_erc20
+$ cd contracts_erc20
+```
+
+创建`erc20.sol`.  也可以直接使用[openzeppelin](https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/token/ERC20/IERC20.sol) 的定义
+
+```solidity
+// SPDX-License-Identifier: GPL-3.0
+pragma solidity >=0.4.16 <0.9.0;
+
+
+interface ERC20 {
+    function name() external view returns (string memory);
+    function symbol() external view returns (string memory);
+
+    function totalSupply() external view returns (uint);
+    function balanceOf(address tokenOwner) external view returns (uint balance);
+    function allowance(address tokenOwner, address spender) external view returns (uint remaining);
+    function transfer(address to, uint tokens) external returns (bool success);
+    function approve(address spender, uint tokens) external returns (bool success);
+    function transferFrom(address from, address to, uint tokens) external returns (bool success);
+
+    event Transfer(address indexed from, address indexed to, uint tokens);
+    event Approval(address indexed tokenOwner, address indexed spender, uint tokens);
+}
+```
+
+编译生成可以让go使用的文件
+
+```shell
+$ solc --abi erc20.sol -o build
+$ abigen --abi=./build/ERC20.abi --pkg=token --out=erc20.go
+```
+
+然后使用生成的`erc20.go`可以直接读取所有的ERC20合约
+
+```go
+package main
+
+import (
+   "fmt"
+   "github.com/ethereum/go-ethereum/accounts/abi/bind"
+   "github.com/ethereum/go-ethereum/common"
+   "github.com/ethereum/go-ethereum/ethclient"
+   "log"
+   "math"
+   "math/big"
+   "strconv"
+   token "github.com/crazygit/ethereum-development-with-go-book-code/contracts_erc20"
+)
+
+func main() {
+   client, err := ethclient.Dial("https://cloudflare-eth.com")
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   // Golem (GNT) Address
+   tokenAddress := common.HexToAddress("0xa74476443119A942dE498590Fe1f2454d7D4aC0d")
+   instance, err := token.NewToken(tokenAddress, client)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   address := common.HexToAddress("0x0536806df512d6cdde913cf95c9886f65b1d3462")
+   bal, err := instance.BalanceOf(&bind.CallOpts{}, address)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   name, err := instance.Name(&bind.CallOpts{})
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   symbol, err := instance.Symbol(&bind.CallOpts{})
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   decimals, err := instance.Decimals(&bind.CallOpts{})
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   fmt.Printf("name: %s\n", name)         // "name: Golem Network"
+   fmt.Printf("symbol: %s\n", symbol)     // "symbol: GNT"
+   fmt.Printf("decimals: %v\n", decimals) // "decimals: 18"
+
+   fmt.Printf("wei: %s\n", bal)
+
+   fbal := new(big.Float)
+   fbal.SetString(bal.String())
+   n, err := strconv.Atoi(decimals.String())
+   if err != nil {
+      log.Fatal(err)
+   }
+   value := new(big.Float).Quo(fbal, big.NewFloat(math.Pow10(n)))
+
+   fmt.Printf("balance: %f", value)
+}
+```
+
+
+## 事件日志
+与[[#订阅新区块的信息]] 一样，订阅事件日志还是需要使用`websocket`连接。
+
+下面分步骤介绍了解析事件日志，完整的例子可以参考[[#解析交易信息]]
+### 订阅日志事件
+使用 `client.SubscribeFilterLogs()` 订阅日志事件
+也可以使用`client.FilterLogs()`一次性查询日志事件。
+
+订阅和查询条件都是通过`ethereum.FilterQuery()`来设置的。
+
+```go
+package main
+
+import (
+   "context"
+   "fmt"
+   "log"
+   "github.com/ethereum/go-ethereum"
+   "github.com/ethereum/go-ethereum/common"
+   "github.com/ethereum/go-ethereum/core/types"
+   "github.com/ethereum/go-ethereum/ethclient"
+)
+
+func main() {
+   client, err := ethclient.Dial("wss://mainnet.infura.io/ws/v3/28d5693e8bee4b58a61f0c627d62331e")
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   contractAddress := common.HexToAddress("0xf1EEfEE62A8651c3772cd8D7ba9031b7029316f7")
+   // 设置日志过滤条件
+   query := ethereum.FilterQuery{
+      Addresses: []common.Address{contractAddress},
+   }
+
+   logs := make(chan types.Log)
+   // 也可以使用 client.FilterLogs根据过滤条件来查询日志
+   sub, err := client.SubscribeFilterLogs(context.Background(), query, logs)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   for {
+      select {
+      case err := <-sub.Err():
+         log.Fatal(err)
+      case vLog := <-logs:
+         fmt.Println(vLog) // pointer to event log
+      }
+   }
+}
+```
+
+### 解析日志事件
+解析日志事件需要使用合约的ABI信息。加载ABI信息后，使用
+`contractAbi.UnpackIntoInterface()`来解析日志的数据。
+
+#### 主题(Topics)
+
+若solidity事件包含`indexed`事件类型，那么它们将成为**主题**而不是日志的数据属性的一部分。在solidity中您最多只能有4个主题，但只有3个可索引的事件类型。第一个主题总是事件的签名。
+
+```go
+package main
+
+import (
+   "context"
+   "fmt"
+   "log"
+   "math/big"
+   "strings"
+   "github.com/ethereum/go-ethereum"
+   "github.com/ethereum/go-ethereum/accounts/abi"
+   "github.com/ethereum/go-ethereum/common"
+   "github.com/ethereum/go-ethereum/crypto"
+   "github.com/ethereum/go-ethereum/ethclient"
+   store "github.com/crazygit/ethereum-development-with-go-book-code/contracts"
+)
+
+func main() {
+   client, err := ethclient.Dial("wss://rinkeby.infura.io/ws/v3/28d5693e8bee4b58a61f0c627d62331e")
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   contractAddress := common.HexToAddress("0x147B8eb97fD247D06C4006D269c90C1908Fb5D54")
+   // 查询指定区块的日志
+   query := ethereum.FilterQuery{
+      FromBlock: big.NewInt(2394201),
+      ToBlock:   big.NewInt(2394201),
+      Addresses: []common.Address{
+         contractAddress,
+      },
+   }
+   //
+   logs, err := client.FilterLogs(context.Background(), query)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   contractAbi, err := abi.JSON(strings.NewReader(store.StoreMetaData.ABI))
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   for _, vLog := range logs {
+      fmt.Println(vLog.BlockHash.Hex()) // 0x3404b8c050aa0aacd0223e91b5c32fee6400f357764771d0684fa7b3f448f1a8
+      fmt.Println(vLog.BlockNumber)     // 2394201
+      fmt.Println(vLog.TxHash.Hex())    // 0x280201eda63c9ff6f305fcee51d5eb86167fab40ca3108ec784e8652a0e2b1a6
+
+      event := struct {
+         Key   [32]byte
+         Value [32]byte
+      }{}
+      err := contractAbi.UnpackIntoInterface(&event, "ItemSet", vLog.Data)
+      if err != nil {
+         log.Fatal(err)
+      }
+
+      fmt.Println(string(event.Key[:]))
+      fmt.Println(string(event.Value[:]))
+
+      var topics [4]string
+      for i := range vLog.Topics {
+         topics[i] = vLog.Topics[i].Hex()
+      }
+
+      fmt.Println(topics[0]) // 0xe79e73da417710ae99aa2088575580a60415d359acfad9cdd3382d59c80281d4
+   }
+
+   eventSignature := []byte("ItemSet(bytes32,bytes32)")
+   hash := crypto.Keccak256Hash(eventSignature)
+   fmt.Println(hash.Hex()) // 0xe79e73da417710ae99aa2088575580a60415d359acfad9cdd3382d59c80281d4
+}
+```
+
+### 解析ERC20合约的日志
+跟[[#查询ERC20合约]] 的流程基本一致
+
+```go
+package main
+
+import (
+   "context"
+   "fmt"
+   "log"
+   "math/big"
+   "strings"
+   token "github.com/crazygit/ethereum-development-with-go-book-code/contracts_erc20"
+   "github.com/ethereum/go-ethereum"
+   "github.com/ethereum/go-ethereum/accounts/abi"
+   "github.com/ethereum/go-ethereum/common"
+   "github.com/ethereum/go-ethereum/crypto"
+   "github.com/ethereum/go-ethereum/ethclient"
+)
+
+// LogTransfer ..type LogTransfer struct {
+   From   common.Address
+   To     common.Address
+   Tokens *big.Int
+}
+
+// LogApproval ..type LogApproval struct {
+   TokenOwner common.Address
+   Spender    common.Address
+   Tokens     *big.Int
+}
+
+func main() {
+   client, err := ethclient.Dial("https://mainnet.infura.io/v3/28d5693e8bee4b58a61f0c627d62331e")
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   // 0x Protocol (ZRX) token address
+   contractAddress := common.HexToAddress("0xe41d2489571d322189246dafa5ebde1f4699f498")
+   query := ethereum.FilterQuery{
+      FromBlock: big.NewInt(6383820),
+      ToBlock:   big.NewInt(6383840),
+      Addresses: []common.Address{
+         contractAddress,
+      },
+   }
+
+   logs, err := client.FilterLogs(context.Background(), query)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   contractAbi, err := abi.JSON(strings.NewReader(string(token.TokenMetaData.ABI)))
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   logTransferSig := []byte("Transfer(address,address,uint256)")
+   LogApprovalSig := []byte("Approval(address,address,uint256)")
+   logTransferSigHash := crypto.Keccak256Hash(logTransferSig)
+   logApprovalSigHash := crypto.Keccak256Hash(LogApprovalSig)
+
+   for _, vLog := range logs {
+      fmt.Printf("Log Block Number: %d\n", vLog.BlockNumber)
+      fmt.Printf("Log Index: %d\n", vLog.Index)
+
+      switch vLog.Topics[0].Hex() {
+      case logTransferSigHash.Hex():
+         fmt.Printf("Log Name: Transfer\n")
+
+         var transferEvent LogTransfer
+
+         err := contractAbi.UnpackIntoInterface(&transferEvent, "Transfer", vLog.Data)
+         if err != nil {
+            log.Fatal(err)
+         }
+
+         transferEvent.From = common.HexToAddress(vLog.Topics[1].Hex())
+         transferEvent.To = common.HexToAddress(vLog.Topics[2].Hex())
+
+         fmt.Printf("From: %s\n", transferEvent.From.Hex())
+         fmt.Printf("To: %s\n", transferEvent.To.Hex())
+         fmt.Printf("Tokens: %s\n", transferEvent.Tokens.String())
+
+      case logApprovalSigHash.Hex():
+         fmt.Printf("Log Name: Approval\n")
+
+         var approvalEvent LogApproval
+
+         err := contractAbi.UnpackIntoInterface(&approvalEvent, "Approval", vLog.Data)
+         if err != nil {
+            log.Fatal(err)
+         }
+
+         approvalEvent.TokenOwner = common.HexToAddress(vLog.Topics[1].Hex())
+         approvalEvent.Spender = common.HexToAddress(vLog.Topics[2].Hex())
+
+         fmt.Printf("Token Owner: %s\n", approvalEvent.TokenOwner.Hex())
+         fmt.Printf("Spender: %s\n", approvalEvent.Spender.Hex())
+         fmt.Printf("Tokens: %s\n", approvalEvent.Tokens.String())
+      }
+
+      fmt.Printf("\n\n")
+   }
+}
+```
+
+## 签名
+数字签名允许不可否认性，因为这意味着签署消息的人必须拥有私钥，来证明消息是真实的。 任何人都可以验证消息的真实性，只要它们具有原始数据的散列和签名者的公钥即可。 签名是区块链的基本组成部分，我们将在接下来的几节课中学习如何生成和验证签名。
+
+### 生成签名信息
+
+生成签名信息的需要两个信息:
+
+- 签名者私钥
+- 要签名的数据的哈希
+
+可以使用任何输出为32字节的哈希算法。 我们将使用Keccak-256作为哈希算法，这是以太坊常常使用的算法。
+
+```go
+package main
+
+import (
+   "fmt"
+   "log"
+   "os"
+   "github.com/ethereum/go-ethereum/common/hexutil"
+   "github.com/ethereum/go-ethereum/crypto"
+)
+
+func main() {
+   privateKey, err := crypto.HexToECDSA(os.Getenv("PRIVATE_KEY"))
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   data := []byte("hello")
+   hash := crypto.Keccak256Hash(data)
+   fmt.Printf("hash hex: %s\n", hash.Hex())
+
+   signature, err := crypto.Sign(hash.Bytes(), privateKey)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   fmt.Printf("signature: %s\n", hexutil.Encode(signature))
+}
+```
+
+### 验证签名
+
+我们需要有3样数据来验证签名:
+
+- 签名本身
+- 原始数据的哈希
+- 签名者的公钥
+
+利用这些信息，我们可以确定公钥对的私钥持有者是否确实签署了该消息。
+
+首先验证签名里提取的公钥信息是否和我们从私钥里导出的公钥信息是否一致, 再验证签名自身。
+
+```go
+package main
+
+import (
+   "bytes"
+   "crypto/ecdsa"
+   "fmt"
+   "log"
+   "os"
+   "github.com/ethereum/go-ethereum/common/hexutil"
+   "github.com/ethereum/go-ethereum/crypto"
+)
+
+func main() {
+   privateKey, err := crypto.HexToECDSA(os.Getenv("PRIVATE_KEY"))
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   publicKey := privateKey.Public()
+   publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+   if !ok {
+      log.Fatal("cannot assert type: publicKey is not of type *ecdsa.PublicKey")
+   }
+   // 获取字节格式的公钥
+   publicKeyBytes := crypto.FromECDSAPub(publicKeyECDSA)
+
+   // 计算原始数据的hash
+   data := []byte("hello")
+   hash := crypto.Keccak256Hash(data)
+   fmt.Printf("hash hex: %s\n", hash.Hex())
+
+   signature, err := crypto.Sign(hash.Bytes(), privateKey)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   fmt.Printf("Signature: %s\n", hexutil.Encode(signature))
+   // 从签名信息提取签名使用的公钥信息
+   sigPublicKey, err := crypto.Ecrecover(hash.Bytes(), signature)
+   if err != nil {
+      log.Fatal(err)
+   }
+   // 比较签名使用的公钥和从私钥导出的公钥是否一致
+   matches := bytes.Equal(sigPublicKey, publicKeyBytes)
+   fmt.Printf("match: %t\n", matches) // true
+   // SigToPub方法做同样的事情，区别是它将返回ECDSA类型中的签名公钥。
+   sigPublicKeyECDSA, err := crypto.SigToPub(hash.Bytes(), signature)
+   if err != nil {
+      log.Fatal(err)
+   }
+
+   sigPublicKeyBytes := crypto.FromECDSAPub(sigPublicKeyECDSA)
+   matches = bytes.Equal(sigPublicKeyBytes, publicKeyBytes)
+   fmt.Printf("match: %t\n", matches) // true
+
+   //为方便起见，go-ethereum/crypto包提供了VerifySignature函数，该函数接收原始数据的签名，哈希值和字节格式的公钥。
+   // 它返回一个布尔值，如果公钥与签名的签名者匹配，则为true。
+   //一个重要的问题是我们必须首先删除signature的最后一个字节，因为它是ECDSA恢复ID，不能包含它。
+   signatureNoRecoverID := signature[:len(signature)-1] // remove recovery id
+   verified := crypto.VerifySignature(publicKeyBytes, hash.Bytes(), signatureNoRecoverID)
+   fmt.Printf("verified: %t\n", verified) // true
 }
 ```
