@@ -47,7 +47,7 @@ func main() {
 [Introducing A Simplified Infura Plan, With Free Access to Ethereum Archive Data and All Networks](https://blog.infura.io/post/introducing-a-simplified-infura-plan-with-free-access-to-ethereum-archive-data-and-all-network-apis) 。
 
 
-比如使用`infra`在查询一些较老的block信息时，会报没有权限的错误。
+在使用`infra`在查询一些较老的block信息时，会报没有权限的错误。
 
 ```go
 package main
